@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -32,6 +33,29 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+def _fallback_suggest_outfit(new_item: dict, wardrobe: dict) -> str:
+    items = wardrobe.get("items", [])
+    if not items:
+        return (
+            f"The {new_item['title']} would look great with high-waisted jeans or a flowy skirt, "
+            "chunky boots, and a lightweight jacket for a relaxed vintage streetwear vibe. "
+            "Keep accessories minimal and let the graphic print be the focus."
+        )
+
+    return (
+        f"Style the {new_item['title']} with pieces from your wardrobe for an easy outfit: "
+        "pair it with a fitted denim jacket and straight-leg jeans, or tuck it into a skirt with "
+        "bright sneakers for an effortless casual look that balances comfort and vintage flair."
+    )
+
+
+def _fallback_create_fit_card(outfit: str, new_item: dict) -> str:
+    return (
+        f"Just scored this {new_item['title']} for ${new_item['price']} on {new_item['platform']} — "
+        "it's the perfect vintage-ready piece to elevate a laid-back outfit with easy streetwear energy."
+    )
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +93,36 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # Filter by price and size
+    filtered = []
+    for item in listings:
+        if max_price is not None and item["price"] > max_price:
+            continue
+        if size is not None and size.lower() not in item["size"].lower():
+            continue
+        filtered.append(item)
+
+    # Score by keyword overlap — word-boundary match to avoid false substring hits
+    keywords = [kw for kw in description.lower().split() if len(kw) > 1]
+    scored = []
+    for item in filtered:
+        searchable = " ".join([
+            item["title"],
+            item["description"],
+            " ".join(item["style_tags"]),
+            item["category"],
+        ]).lower()
+        score = sum(
+            1 for kw in keywords
+            if re.search(r'\b' + re.escape(kw) + r'\b', searchable)
+        )
+        if score > 0:
+            scored.append((score, item))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in scored]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +152,51 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    client = _get_groq_client()
+    items = wardrobe.get("items", [])
+
+    item_summary = (
+        f"Item: {new_item['title']}\n"
+        f"Category: {new_item['category']}\n"
+        f"Colors: {', '.join(new_item['colors'])}\n"
+        f"Style tags: {', '.join(new_item['style_tags'])}\n"
+        f"Condition: {new_item['condition']}\n"
+        f"Price: ${new_item['price']}"
+    )
+
+    if not items:
+        prompt = (
+            f"A user is considering buying this secondhand item:\n\n{item_summary}\n\n"
+            "They are a new user with no wardrobe on file. Give them 2 general styling directions — "
+            "describe the TYPE of pieces to look for (e.g. 'wide-leg trousers', 'chunky boots', "
+            "'an oversized blazer'), NOT specific items they might own. "
+            "For each direction, name the aesthetic or vibe it creates. "
+            "Do NOT say 'pair with your...' or reference any existing wardrobe. "
+            "Start your response with: 'No wardrobe on file yet — here are two directions to build around this piece:'"
+        )
+    else:
+        wardrobe_lines = "\n".join(
+            f"- {w['name']} ({w['category']}, {', '.join(w['colors'])})"
+            for w in items
+        )
+        prompt = (
+            f"A user is considering buying this secondhand item:\n\n{item_summary}\n\n"
+            f"Here is their existing wardrobe:\n{wardrobe_lines}\n\n"
+            "Suggest 1-2 complete outfits that use the new item with pieces ALREADY IN their wardrobe above. "
+            "You MUST name each wardrobe piece by its exact name from the list. "
+            "Do not suggest pieces they don't own. Be specific about how to style it and what vibe it creates. "
+            "Start your response with: 'From your wardrobe:'"
+        )
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return _fallback_suggest_outfit(new_item, wardrobe)
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +228,34 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return (
+            "Couldn't generate a fit card — the outfit suggestion was empty. "
+            "Try running suggest_outfit again before calling create_fit_card."
+        )
+
+    client = _get_groq_client()
+
+    prompt = (
+        f"Write a 2-4 sentence Instagram/TikTok caption for this thrift find:\n\n"
+        f"Item: {new_item['title']}\n"
+        f"Price: ${new_item['price']}\n"
+        f"Platform: {new_item['platform']}\n\n"
+        f"Outfit styling context:\n{outfit}\n\n"
+        "Requirements:\n"
+        "- Sound like a real OOTD post, not a product description\n"
+        "- Mention the item name, price, and platform naturally — each exactly once\n"
+        "- Capture the specific vibe of the outfit\n"
+        "- Keep it casual and authentic, like something you'd actually post\n"
+        "Return just the caption text, no hashtags, no extra commentary."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=1.1,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return _fallback_create_fit_card(outfit, new_item)

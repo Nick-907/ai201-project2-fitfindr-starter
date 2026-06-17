@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -92,9 +94,87 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # ── Step 2: Parse query for description, size, max_price ─────────────────
+    # Extract price: matches "$30" or bare "30" after price words
+    price_match = re.search(r'\$(\d+(?:\.\d+)?)\b|\bunder\s+(\d+(?:\.\d+)?)\b', query, re.IGNORECASE)
+    if price_match:
+        raw = price_match.group(1) or price_match.group(2)
+        max_price = float(raw)
+    else:
+        max_price = None
+
+    # Extract size: "size M", or standalone size token
+    size_match = re.search(
+        r'\bsize\s+([A-Za-z0-9/]+)\b|\b(XXS|XS|S/M|M/L|L/XL|XL|XXL|[SML])\b',
+        query, re.IGNORECASE
+    )
+    size = None
+    if size_match:
+        size = (size_match.group(1) or size_match.group(2)).strip()
+
+    # Description: strip price/size tokens and common stop words to get clean keywords
+    description = query
+    if price_match:
+        description = description.replace(price_match.group(0), "")
+    if size_match:
+        description = description.replace(size_match.group(0), "")
+
+    # Remove stop/filler words — longer phrases must come BEFORE their component words
+    stop_phrases = [
+        "looking for", "i'm looking for", "im looking for", "i am looking for",
+        "i want", "i need", "show me", "find me", "do you have",
+        "under", "around", "about", "size", "in size",
+        "looking", "for", "a", "an", "the", "some", "any",
+    ]
+    for phrase in stop_phrases:
+        description = re.sub(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)', ' ', description, flags=re.IGNORECASE)
+    description = " ".join(description.split())  # collapse whitespace
+
+    session["parsed"] = {
+        "description": description,
+        "size": size,
+        "max_price": max_price,
+    }
+
+    # ── Step 3: Search listings ───────────────────────────────────────────────
+    results = search_listings(
+        description=description,
+        size=size,
+        max_price=max_price,
+    )
+    session["search_results"] = results
+
+    if not results:
+        filters = []
+        if size:
+            filters.append(f"size {size}")
+        if max_price:
+            filters.append(f"under ${max_price:.0f}")
+        filter_note = f" ({', '.join(filters)})" if filters else ""
+        session["error"] = (
+            f"No listings found for \"{description}\"{filter_note}. "
+            "Try broader keywords, a different size, or a higher price."
+        )
+        return session
+
+    # ── Step 4: Select top result ─────────────────────────────────────────────
+    session["selected_item"] = results[0]
+
+    # ── Step 5: Suggest outfit ────────────────────────────────────────────────
+    session["outfit_suggestion"] = suggest_outfit(
+        new_item=session["selected_item"],
+        wardrobe=session["wardrobe"],
+    )
+
+    # ── Step 6: Create fit card ───────────────────────────────────────────────
+    session["fit_card"] = create_fit_card(
+        outfit=session["outfit_suggestion"],
+        new_item=session["selected_item"],
+    )
+
+    # ── Step 7: Return session ────────────────────────────────────────────────
     return session
 
 

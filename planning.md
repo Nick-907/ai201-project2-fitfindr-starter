@@ -98,35 +98,69 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 ## Architecture
 
-<!-- Draw a diagram of your agent showing how the components connect:
-     User input → Planning Loop → Tools (search_listings, suggest_outfit, create_fit_card)
-                                                                          ↕
-                                                                   State / Session
-     Show what triggers each tool, how state flows between them, and where error paths branch off.
-     Use ASCII art or a Mermaid diagram (https://mermaid.js.org/syntax/flowchart.html).
-     Do NOT embed an image — graders need to read your diagram directly in the file;
-     an embedded image or screenshot cannot be evaluated.
-     You'll share this diagram with an AI tool when asking it to implement
-     the planning loop and each individual tool. -->
+```
+User query: "vintage graphic tee under $30, baggy jeans + chunky sneakers"
+    │
+    ▼
+Planning Loop
+    │  extracts: description="vintage graphic tee", size=None, max_price=30.0
+    │
+    ├─► search_listings(description, size, max_price)
+    │       │                               ┌─── Session State ───────────────────┐
+    │       │ results = []                  │  wardrobe   (loaded at session start)│
+    │       ├──► [STOP] "No listings found  │  listings   (set after search)       │
+    │       │    for those filters. Try     │  selected_item (set after search)    │
+    │       │    broader keywords or a      │  outfit     (set after suggest)      │
+    │       │    higher price." → return    │  fit_card   (set after create)       │
+    │       │                               └─────────────────────────────────────┘
+    │       │ results = [item1, item2, ...]         ▲         ▲         ▲
+    │       ▼                                       │         │         │
+    │   Session: listings = results                 │         │         │
+    │            selected_item = results[0] ────────┘         │         │
+    │                                                          │         │
+    ├─► suggest_outfit(selected_item, wardrobe) ───────────────┘         │
+    │       │                                                             │
+    │       │ wardrobe['items'] == []                                     │
+    │       ├──► [FALLBACK] LLM prompt for general styling advice         │
+    │       │    (no wardrobe pieces named, no error raised)              │
+    │       │                                                             │
+    │       │ wardrobe has items                                          │
+    │       ├──► LLM prompt with wardrobe pieces + new_item               │
+    │       │                                                             │
+    │       ▼                                                             │
+    │   Session: outfit = "Pair with your wide-leg jeans and..."          │
+    │                                                                     │
+    └─► create_fit_card(outfit, selected_item) ───────────────────────────┘
+            │
+            │ outfit == "" or whitespace
+            ├──► [STOP] return "Couldn't generate a fit card —
+            │    outfit suggestion was empty." (no exception raised)
+            │
+            │ outfit has content
+            ├──► LLM prompt for casual OOTD caption
+            │
+            ▼
+        Session: fit_card = "Thrifted this $24 band tee off Depop..."
+            │
+            ▼
+    Return to user: listings summary + outfit suggestion + fit card caption
+```
 
 ---
 
 ## AI Tool Plan
 
-<!-- For each part of the implementation below, describe:
-     - Which AI tool you plan to use (Claude, Copilot, ChatGPT, etc.)
-     - What you'll give it as input (which sections of this planning.md, your agent diagram)
-     - What you expect it to produce
-     - How you'll verify the output matches your spec before moving on
-
-     "I'll use AI to help me code" is not a plan.
-     "I'll give Claude my Tool 1 spec (inputs, return value, failure mode) and ask it to implement
-     search_listings() using load_listings() from the data loader — then test it against 3 queries
-     before trusting it" is a plan. -->
-
 **Milestone 3 — Individual tool implementations:**
 
+For `search_listings`, I'll give Claude the Tool 1 block (inputs, return value, failure mode) and the `data_loader.py` docstring, then ask it to implement the function using `load_listings()` — specifically to filter by `max_price` and `size` first, then score by keyword overlap against `title`, `description`, and `style_tags`, drop zero-score results, and sort descending. Before accepting the output I'll check that it handles all three filter combinations (both params, one param, neither) and run it against at least three queries — one that should return results, one that returns empty due to price, and one with a size that doesn't exist in the data.
+
+For `suggest_outfit`, I'll paste the Tool 2 block plus the wardrobe schema from `data_loader.py` into Claude and ask it to write the function with two branches: an empty-wardrobe prompt path and a wardrobe-items prompt path. I'll verify the generated code actually checks `len(wardrobe['items']) == 0` before building the prompt, and I'll run it once with the example wardrobe and once with an empty one to confirm both paths return a non-empty string.
+
+For `create_fit_card`, I'll give Claude the Tool 3 block and ask it to implement the guard clause first (empty/whitespace outfit → return error string, no exception), then build the LLM prompt that includes item name, price, platform, and the outfit string, requesting a casual 2–4 sentence OOTD caption at a higher temperature. I'll test it with a real outfit string and confirm the caption mentions name, price, and platform exactly once, then test the guard clause with an empty string to confirm it returns an error message without crashing.
+
 **Milestone 4 — Planning loop and state management:**
+
+I'll give Claude the Architecture diagram from this file plus the State Management section and ask it to implement the planning loop in `agent.py` as a function that: (1) calls `search_listings` with extracted params, (2) checks if results is empty and returns early with the "no listings found" message if so, (3) sets `selected_item = results[0]` in session state, (4) calls `suggest_outfit`, (5) calls `create_fit_card`, and (6) returns the assembled session. I'll verify the generated loop matches the diagram's control flow by tracing through it manually with a mock that returns an empty list from `search_listings` and confirming the other two tools are never called in that case.
 
 ---
 
@@ -139,13 +173,13 @@ Write out what a full user interaction looks like from start to finish — tool 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
 **Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+The agent parses the query and calls `search_listings(description="vintage graphic tee", size=None, max_price=30.0)`. Size is None because the user didn't specify one. The function loads all listings, drops anything over $30, scores the rest by how many of the words "vintage", "graphic", "tee" appear in each listing's title, description, and style_tags, then returns the matches sorted highest-score-first — let's say it returns 4 results, with a $24 band tee from Depop at the top. The agent sets `session["listings"] = results` and `session["selected_item"] = results[0]`.
 
 **Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+With a result in hand, the agent calls `suggest_outfit(new_item=selected_item, wardrobe=session["wardrobe"])`. The wardrobe was loaded from `get_example_wardrobe()` at session start and has 10 items including wide-leg jeans and white low-top sneakers, which maps well to what the user described. The LLM receives a prompt listing those wardrobe items alongside the new band tee's category (tops), colors (black, white), and style_tags (vintage, graphic, streetwear), and responds with something like: "Outfit 1: Tuck the band tee into your wide-leg jeans and add the white low-top sneakers for an easy streetwear look. Outfit 2: Leave it untucked over biker shorts with chunky boots for a grungier vibe." The agent stores this in `session["outfit"]`.
 
 **Step 3:**
-<!-- Continue until the full interaction is complete -->
+The agent calls `create_fit_card(outfit=session["outfit"], new_item=selected_item)`. The outfit string is non-empty so the guard clause passes, and the LLM generates a casual 2–4 sentence OOTD caption at a higher temperature — something like: "Grabbed this vintage band tee for $24 off Depop and it goes with literally everything. Styled it tucked into wide-legs with my low-tops and I haven't taken it off since. Thrift finds > retail, always." The agent stores this in `session["fit_card"]`.
 
 **Final output to user:**
-<!-- What does the user actually see at the end? -->
+The user sees three things in the response: (1) a short listing summary showing the top results with title, price, condition, and platform; (2) the outfit suggestions from step 2, giving them concrete styling ideas using their actual wardrobe pieces; and (3) the fit card caption from step 3, ready to copy and post. If they want to explore a different result from the list, they can ask and the agent re-runs steps 2 and 3 with that item as `selected_item`.
